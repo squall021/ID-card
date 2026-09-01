@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>名牌製作</title>
+  <link rel="stylesheet" href="style.css" />
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-mark">ID</div>
+      <div>
+        <h1>識別證套印工具</h1>
+        <div class="sub">Badge Template & Data Merge</div>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <button id="undoBtn" class="header-btn" title="復原 Ctrl+Z">↶ 復原</button>
+      <button id="redoBtn" class="header-btn" title="重做 Ctrl+Y">↷ 重做</button>
+      <label class="template-name">版型：
+        <input id="templateName" value="未命名版型" />
+      </label>
+      <span id="saveStatus" class="save-status">尚未儲存</span>
+    </div>
+  </header>
+
+  <nav class="ribbon-tabs">
+    <button class="ribbon-tab active" data-tab="file">檔案</button>
+    <button class="ribbon-tab" data-tab="template">版型</button>
+    <button class="ribbon-tab" data-tab="insert">插入</button>
+    <button class="ribbon-tab" data-tab="data">資料</button>
+    <button class="ribbon-tab" data-tab="preview">預覽</button>
+    <button class="ribbon-tab" data-tab="export">匯出</button>
+    <button class="ribbon-tab" data-tab="view">檢視</button>
+  </nav>
+
+  <section class="ribbon">
+    <div class="ribbon-panel active" data-panel="file">
+      <button id="newTemplateBtn" class="tool-btn">＋ 新增版型</button>
+      <button id="saveTemplateBtn" class="tool-btn">儲存版型</button>
+      <button id="loadTemplateBtn" class="tool-btn">載入版型</button>
+      <button id="exportTemplateBtn" class="tool-btn">匯出版型 JSON</button>
+      <label class="tool-btn file-like">匯入版型 JSON
+        <input id="importTemplateInput" type="file" accept=".json,application/json" hidden />
+      </label>
+    </div>
+
+    <div class="ribbon-panel" data-panel="template">
+      <label>寬 <input id="cardWidth" type="number" value="90" min="20" step="0.1"> mm</label>
+      <label>高 <input id="cardHeight" type="number" value="54" min="20" step="0.1"> mm</label>
+      <button id="landscapeBtn" class="tool-btn">橫式</button>
+      <button id="portraitBtn" class="tool-btn">直式</button>
+      <label class="tool-btn file-like">上傳目前面底圖
+        <input id="bgUpload" type="file" accept="image/*" hidden />
+      </label>
+      <button id="clearBgBtn" class="tool-btn danger-lite">移除目前面底圖</button>
+      <button id="copyFrontToBackBtn" class="tool-btn">複製正面到背面</button>
+    </div>
+
+    <div class="ribbon-panel" data-panel="insert">
+      <button id="addFixedTextBtn" class="tool-btn">固定文字</button>
+      <button id="addExcelFieldBtn" class="tool-btn">Excel 套印欄位</button>
+      <label class="tool-btn file-like">Logo / 圖片
+        <input id="imageUpload" type="file" accept="image/*" hidden />
+      </label>
+      <button id="addBoxBtn" class="tool-btn">色塊</button>
+      <button id="addQrBtn" class="tool-btn">QR Code</button>
+    </div>
+
+    <div class="ribbon-panel" data-panel="data">
+      <label class="tool-btn primary file-like">匯入 Excel
+        <input id="excelInput" type="file" accept=".xlsx,.xls,.csv" hidden />
+      </label>
+      <button id="fieldMappingBtn" class="tool-btn">欄位對應</button>
+      <button id="showDataBtn" class="tool-btn">展開名單</button>
+      <button id="removeExcelBtn" class="tool-btn danger-lite" disabled>移除 Excel 名單</button>
+      <button id="addFieldBtn" class="tool-btn">＋ 自訂欄位</button>
+      <span id="dataInfo" class="ribbon-hint">尚未匯入資料</span>
+    </div>
+
+    <div class="ribbon-panel" data-panel="preview">
+      <button id="prevRecordRibbon" class="tool-btn">← 上一筆</button>
+      <button id="nextRecordRibbon" class="tool-btn">下一筆 →</button>
+      <button id="previewModeBtn" class="tool-btn primary">全螢幕預覽</button>
+    </div>
+
+    <div class="ribbon-panel" data-panel="export">
+      <button id="exportCurrentPngBtn" class="tool-btn">目前面單張 PNG</button>
+      <button id="exportAllZipBtn" class="tool-btn">全部正反面 PNG ZIP</button>
+      <button id="exportPdfBtn" class="tool-btn">正反面 PDF</button>
+      <button id="exportA4Btn" class="tool-btn">A4 拼版</button>
+      <button id="printQtySettingsBtn" class="tool-btn primary">輸出份數設定</button>
+      <button id="a4SettingsBtn" class="tool-btn">A4 拼版設定</button>
+      <span id="printQtySummary" class="ribbon-hint">目前版型 × 1 份</span>
+    </div>
+
+    <div class="ribbon-panel" data-panel="view">
+      <button id="toggleLeftBtn" class="tool-btn">左側面板</button>
+      <button id="toggleRightBtn" class="tool-btn">右側面板</button>
+      <button id="zoomOutRibbon" class="tool-btn">－</button>
+      <button id="fitRibbon" class="tool-btn">適合畫面</button>
+      <button id="zoomResetRibbon" class="tool-btn">100%</button>
+      <button id="zoomInRibbon" class="tool-btn">＋</button>
+      <label class="view-toggle"><input id="toggleGuides" type="checkbox" checked> 智慧對準線</label>
+      <label class="view-toggle"><input id="toggleEdgeSnap" type="checkbox" checked> 邊界吸附</label>
+    </div>
+  </section>
+
+  <main class="workspace">
+    <aside class="side-panel left-panel" id="leftPanel">
+      <div class="panel-tabs">
+        <button class="panel-tab active" data-side="layers">圖層</button>
+        <button class="panel-tab" data-side="fields">資料欄位</button>
+      </div>
+
+      <div class="panel-body side-content active" data-side-content="layers">
+        <div class="current-side-note">目前圖層：<strong id="layerSideLabel">正面</strong></div>
+        <div id="layerList" class="layer-list"></div>
+        <button id="addObjectShortcut" class="wide-btn">＋ 新增固定文字</button>
+      </div>
+
+      <div class="panel-body side-content" data-side-content="fields">
+        <div id="fieldList" class="field-list"></div>
+        <button id="addFieldShortcut" class="wide-btn">＋ 新增自訂欄位</button>
+      </div>
+    </aside>
+
+    <section class="stage-area">
+      <div class="stage-toolbar">
+        <div class="side-switcher">
+          <button class="side-btn active" data-card-side="front">正面</button>
+          <button class="side-btn" data-card-side="back">背面</button>
+        </div>
+        <div class="zoom-controls">
+          <button id="zoomOut">－</button>
+          <span id="zoomLabel">100%</span>
+          <button id="zoomIn">＋</button>
+          <button id="fitBtn">適合畫面</button>
+          <button id="zoomReset">100%</button>
+        </div>
+      </div>
+
+      <div class="stage-scroll" id="stageScroll">
+        <div class="stage-wrap">
+          <div id="badgeScaleBox" class="badge-scale-box">
+            <div id="badge" class="badge" tabindex="0">
+              <div class="safe-area" data-html2canvas-ignore="true"></div>
+              <div id="guideV" class="editor-guide vertical" data-html2canvas-ignore="true"></div>
+              <div id="guideH" class="editor-guide horizontal" data-html2canvas-ignore="true"></div>
+              <div id="snapEdgeTop" class="edge-snap-indicator top" data-html2canvas-ignore="true"></div>
+              <div id="snapEdgeRight" class="edge-snap-indicator right" data-html2canvas-ignore="true"></div>
+              <div id="snapEdgeBottom" class="edge-snap-indicator bottom" data-html2canvas-ignore="true"></div>
+              <div id="snapEdgeLeft" class="edge-snap-indicator left" data-html2canvas-ignore="true"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="record-bar">
+        <button id="prevRecord">← 上一筆</button>
+        <div class="record-status">
+          <strong id="currentRecordName">範例資料</strong>
+          <span id="recordCounter">0 / 0</span>
+        </div>
+        <button id="nextRecord">下一筆 →</button>
+
+        <div class="record-search">
+          <input id="recordSearch" placeholder="搜尋姓名 / 編號" />
+          <button id="searchBtn">搜尋</button>
+        </div>
+
+        <button id="expandDataBtn">展開 Excel 名單</button>
+      </div>
+    </section>
+
+    <aside class="side-panel right-panel" id="rightPanel">
+      <div class="panel-title">屬性設定</div>
+      <div id="noSelection" class="empty-state">請選取畫布上的物件</div>
+
+      <div id="propertyEditor" class="property-editor hidden">
+        <section class="property-group">
+          <h3>基本</h3>
+          <label>物件名稱 <input id="propName" /></label>
+          <div class="two-cols">
+            <label>X <input id="propX" type="number" step="0.1"> %</label>
+            <label>Y <input id="propY" type="number" step="0.1"> %</label>
+          </div>
+          <div class="two-cols">
+            <label>寬 <input id="propW" type="number" step="0.1"> %</label>
+            <label>高 <input id="propH" type="number" step="0.1"> %</label>
+          </div>
+          <label class="check-row"><input id="propLocked" type="checkbox"> 鎖定物件</label>
+        </section>
+
+        <section id="textProperties" class="property-group hidden">
+          <h3>文字</h3>
+          <label>內容 <input id="propContent" /></label>
+          <label>資料來源 <select id="propField"></select></label>
+          <label>字型
+            <select id="propFontFamily">
+              <option value="'Noto Sans TC','Microsoft JhengHei',sans-serif">Noto Sans TC / 微軟正黑體</option>
+              <option value="'Microsoft JhengHei',sans-serif">微軟正黑體</option>
+              <option value="'PMingLiU',serif">新細明體</option>
+              <option value="'DFKai-SB',serif">標楷體</option>
+              <option value="Arial,sans-serif">Arial</option>
+            </select>
+          </label>
+          <div class="two-cols">
+            <label>目前字級 <input id="propFontSize" type="number" min="6" max="160"> px</label>
+            <label>字距 <input id="propLetterSpacing" type="number" min="-10" max="50" step="0.5"> px</label>
+          </div>
+          <div class="two-cols">
+            <label>文字顏色 <input id="propColor" type="color"></label>
+            <label>行距 <input id="propLineHeight" type="number" min="0.5" max="4" step="0.1"></label>
+          </div>
+          <div class="button-row">
+            <button id="propBoldBtn">粗體</button>
+            <button data-align="left" class="align-btn">靠左</button>
+            <button data-align="center" class="align-btn">置中</button>
+            <button data-align="right" class="align-btn">靠右</button>
+          </div>
+          <label class="check-row"><input id="propAutoShrink" type="checkbox"> 超出範圍自動縮字</label>
+          <div id="autoShrinkLimits" class="two-cols">
+            <label>最大字級 <input id="propMaxFont" type="number" min="6" max="160" value="24"> px</label>
+            <label>最小字級 <input id="propMinFont" type="number" min="6" max="160" value="10"> px</label>
+          </div>
+          <div class="property-tip">自動縮字會在修改內容、切換名單、改字型/字級、調整文字框大小及匯出前重新計算。</div>
+        </section>
+
+        <section id="imageProperties" class="property-group hidden">
+          <h3>圖片</h3>
+          <label>透明度 <input id="propImageOpacity" type="range" min="10" max="100" value="100"></label>
+          <label>顯示方式
+            <select id="propImageFit">
+              <option value="contain">適應</option>
+              <option value="cover">填滿</option>
+              <option value="fill">拉伸</option>
+            </select>
+          </label>
+        </section>
+
+        <section id="boxProperties" class="property-group hidden">
+          <h3>色塊</h3>
+          <div class="two-cols">
+            <label>背景色 <input id="propBoxColor" type="color" value="#d9e6ff"></label>
+            <label>透明度 <input id="propBoxOpacity" type="range" min="10" max="100" value="100"></label>
+          </div>
+        </section>
+
+        <section id="qrProperties" class="property-group hidden">
+          <h3>QR Code</h3>
+          <label>固定內容 <input id="propQrContent" placeholder="網址、文字、編號…" /></label>
+          <label>或資料來源 <select id="propQrField"></select></label>
+        </section>
+
+        <section class="property-group">
+          <div class="button-row full">
+            <button id="duplicateBtn">複製物件</button>
+            <button id="deleteBtn" class="danger">刪除物件</button>
+          </div>
+        </section>
+      </div>
+    </aside>
+  </main>
+
+  <section id="dataDrawer" class="data-drawer">
+    <div class="drawer-head">
+      <div>
+        <strong>Excel 名單</strong>
+        <span id="drawerInfo">尚未匯入資料</span>
+      </div>
+      <button id="closeDataDrawer">關閉</button>
+    </div>
+    <div class="table-wrap">
+      <table id="dataTable">
+        <thead></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div id="newTemplateModal" class="modal hidden">
+    <div class="modal-card">
+      <h2>建立新識別證</h2>
+      <label>版型名稱 <input id="newTemplateName" value="新識別證版型"></label>
+      <div class="preset-grid">
+        <button class="preset active" data-w="90" data-h="54">90 × 54 mm</button>
+        <button class="preset" data-w="85.6" data-h="54">85.6 × 54 mm</button>
+        <button class="preset" data-w="100" data-h="70">100 × 70 mm</button>
+      </div>
+      <div class="two-cols">
+        <label>寬度 <input id="newWidth" type="number" value="90" step="0.1"> mm</label>
+        <label>高度 <input id="newHeight" type="number" value="54" step="0.1"> mm</label>
+      </div>
+      <div class="modal-actions">
+        <button id="cancelNewTemplate">取消</button>
+        <button id="confirmNewTemplate" class="primary-btn">建立版型</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="mappingModal" class="modal hidden">
+    <div class="modal-card mapping-card">
+      <h2>Excel 欄位對應</h2>
+      <p class="modal-note">將 Excel 欄位指定給識別證套印欄位。</p>
+      <div id="mappingRows" class="mapping-rows"></div>
+      <div class="modal-actions">
+        <button id="cancelMapping">取消</button>
+        <button id="confirmMapping" class="primary-btn">套用欄位對應</button>
+      </div>
+    </div>
+  </div>
+
+
+  <div id="printQtyModal" class="modal hidden">
+    <div class="modal-card qty-card">
+      <h2>輸出份數設定</h2>
+      <p class="modal-note">此設定會套用到「全部正反面 PNG ZIP」、「正反面 PDF」及「A4 拼版」。目前面單張 PNG 不受影響。</p>
+
+      <div class="mode-cards">
+        <label class="mode-card">
+          <div class="mode-title">
+            <input type="radio" name="printMode" value="template" checked>
+            <strong>目前版型重複指定份數</strong>
+          </div>
+          <div class="mode-desc">適合「工作人員、VIP、服務台」等沒有姓名、只需要重複印製的識別證。</div>
+          <div id="templateCopiesRow" class="inline-setting">
+            <span>輸出份數</span>
+            <input id="templateCopies" type="number" value="1" min="1" max="9999">
+            <span>份</span>
+          </div>
+        </label>
+
+        <label class="mode-card">
+          <div class="mode-title">
+            <input type="radio" name="printMode" value="rows">
+            <strong>Excel 名單每筆 1 份</strong>
+          </div>
+          <div class="mode-desc">一般有姓名的識別證，每一列資料輸出 1 張。</div>
+        </label>
+
+        <label class="mode-card">
+          <div class="mode-title">
+            <input type="radio" name="printMode" value="quantity">
+            <strong>Excel 每筆依「份數欄位」</strong>
+          </div>
+          <div class="mode-desc">例如工作人員 30 份、服務台 6 份、攝影 4 份，不需要在 Excel 重複建立相同資料列。</div>
+          <div id="quantityFieldRow" class="inline-setting">
+            <span>份數欄位</span>
+            <select id="quantityFieldSelect"></select>
+          </div>
+        </label>
+      </div>
+
+      <div class="qty-preview">
+        <div>
+          <span>預計輸出</span>
+          <strong id="estimatedCopies">1</strong>
+          <span>份識別證</span>
+        </div>
+        <small id="qtyPreviewNote">目前版型將重複輸出 1 份。</small>
+      </div>
+
+      <div class="modal-actions">
+        <button id="cancelPrintQty">取消</button>
+        <button id="savePrintQty" class="primary-btn">套用設定</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="a4Modal" class="modal hidden">
+    <div class="modal-card">
+      <h2>A4 拼版設定</h2>
+      <label>輸出面
+        <select id="a4SideMode">
+          <option value="front">只輸出正面</option>
+          <option value="back">只輸出背面</option>
+          <option value="both">正反面分開輸出 ZIP</option>
+        </select>
+      </label>
+      <label>紙張方向
+        <select id="a4Orientation">
+          <option value="portrait">直式</option>
+          <option value="landscape">橫式</option>
+        </select>
+      </label>
+      <div class="two-cols">
+        <label>上邊界 <input id="a4MarginTop" type="number" value="10" min="0" step="0.5"> mm</label>
+        <label>下邊界 <input id="a4MarginBottom" type="number" value="10" min="0" step="0.5"> mm</label>
+      </div>
+      <div class="two-cols">
+        <label>左邊界 <input id="a4MarginLeft" type="number" value="10" min="0" step="0.5"> mm</label>
+        <label>右邊界 <input id="a4MarginRight" type="number" value="10" min="0" step="0.5"> mm</label>
+      </div>
+      <div class="two-cols">
+        <label>水平間距 <input id="a4GapX" type="number" value="4" min="0" step="0.5"> mm</label>
+        <label>垂直間距 <input id="a4GapY" type="number" value="4" min="0" step="0.5"> mm</label>
+      </div>
+      <label class="check-row"><input id="a4CutLine" type="checkbox" checked> 顯示裁切框線</label>
+      <div class="modal-actions">
+        <button id="closeA4Settings">關閉</button>
+        <button id="saveA4Settings" class="primary-btn">套用設定</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="previewOverlay" class="preview-overlay hidden">
+    <button id="closePreview" class="close-preview">×</button>
+    <div class="preview-head">
+      <span id="previewCounter">0 / 0</span>
+      <div class="preview-side-tabs">
+        <button class="preview-side-btn active" data-preview-side="front">正面</button>
+        <button class="preview-side-btn" data-preview-side="back">背面</button>
+      </div>
+    </div>
+    <div id="previewCloneWrap"></div>
+    <div class="preview-nav">
+      <button id="previewPrev">← 上一筆</button>
+      <button id="previewNext">下一筆 →</button>
+    </div>
+  </div>
+
+  <div id="exportBusy" class="export-busy hidden">處理中…</div>
+
+  <script src="app-1.js"></script>
+  <script src="app-2.js"></script>
+  <script src="app-3.js"></script>
+  <script src="app-4.js"></script>
+</body>
+</html>
