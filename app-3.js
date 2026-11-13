@@ -1,17 +1,36 @@
+  function readWorkbookInWorker(buffer) {
+    return new Promise(resolve => {
+      let worker;
+      try { worker = new Worker("app-excel-worker.js"); }
+      catch { resolve(null); return; }
+      const finish = result => {
+        worker.terminate();
+        resolve(result);
+      };
+      worker.onmessage = ({data}) => finish(data);
+      worker.onerror = event => { event.preventDefault(); finish(null); };
+      worker.onmessageerror = () => finish(null);
+      try { worker.postMessage(buffer, [buffer]); }
+      catch { finish(null); }
+    });
+  }
+
   async function importExcel(file){
-    if(!window.XLSX) return alert("SheetJS 尚未載入，請確認網路連線。");
-    const buf=await file.arrayBuffer();
-    const wb=XLSX.read(buf,{type:"array"});
-    const ws=wb.Sheets[wb.SheetNames[0]];
-    const rows=XLSX.utils.sheet_to_json(ws,{defval:""});
+    if (!file.size) throw new Error("Excel 檔案是空的，原名單已保留。");
+    const useWorker = file.size >= 128 * 1024 && typeof Worker === "function" && location.protocol !== "file:";
+    const result = useWorker ? await readWorkbookInWorker(await file.arrayBuffer()) : null;
+    if (result?.error) throw new Error(result.error);
+    const rows = result?.rows ?? readWorkbook(await loadLibrary("XLSX"), await file.arrayBuffer());
     state.data=rows; state.headers=rows.length?Object.keys(rows[0]):[];
-    state.currentRow=0; state.fieldMap={};
+    state.currentRow=0; state.fieldMap=Object.create(null);
+    if (!state.headers.includes(state.print.quantityField)) state.print.quantityField = "";
     state.headers.forEach(h=>{if(!state.fields.includes(h)) state.fields.push(h);});
+    invalidateDataTable();
     renderFields(); renderDataTable(); applyCurrentRecord();
     updateDataUi();
     $("#dataInfo").textContent=`已匯入 ${rows.length} 筆 / ${state.headers.length} 欄`;
     $("#drawerInfo").textContent=`共 ${rows.length} 筆資料`;
-    openFieldMapping();
+    if(state.headers.length) openFieldMapping();
   }
 
   function suggestTargetField(h){
@@ -50,7 +69,7 @@
   }
 
   function confirmFieldMapping(){
-    state.fieldMap={};
+    state.fieldMap=Object.create(null);
     $$("#mappingRows select").forEach(sel=>{
       let target=sel.value;
       if(!target) return;
@@ -89,47 +108,101 @@
       view:state.view,
       print:state.print,
       a4:state.a4,
-      sides:structuredClone(state.sides)
+      sides:cloneModel(state.sides)
+    };
+  }
+
+  function positiveMm(value, fallback) {
+    const n = Number(value == null || value === "" ? fallback : value);
+    if (!Number.isFinite(n) || n <= 0) throw new Error("識別證寬高必須為大於 0 的毫米數。");
+    return n;
+  }
+
+  function nonnegativeMm(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) throw new Error("邊界和間距必須是大於或等於 0 的毫米數。");
+    return n;
+  }
+
+  function normalizedA4(value, fallback) {
+    const config = {
+      sideMode:value?.sideMode ?? fallback.sideMode,
+      orientation:value?.orientation ?? fallback.orientation,
+      cutLine:typeof value?.cutLine === "boolean" ? value.cutLine : fallback.cutLine
+    };
+    if (!["front","back","both"].includes(config.sideMode) ||
+        !["portrait","landscape"].includes(config.orientation)) throw new Error("A4 輸出面或紙張方向無效。");
+    for (const key of ["marginTop","marginBottom","marginLeft","marginRight","gapX","gapY"]) {
+      config[key] = nonnegativeMm(value?.[key] ?? fallback[key]);
+    }
+    return config;
+  }
+
+  function normalizeSide(source) {
+    if (source != null && (typeof source !== "object" || Array.isArray(source))) throw new Error("版型的正反面資料無效。");
+    const objects = source?.objects ?? [];
+    if (!Array.isArray(objects)) throw new Error("版型的圖層資料無效。");
+    const background = document.createElement("div");
+    setBadgeBackground(background, source?.backgroundImage);
+    const ids = new Set();
+    return {
+      backgroundImage:background.style.backgroundImage,
+      objects:objects.map(object=>{
+        if (!object || typeof object !== "object" || Array.isArray(object)) throw new Error("版型的圖層資料無效。");
+        const layer = Object.fromEntries(Object.entries(object).filter(([,value])=>["string","number","boolean"].includes(typeof value)));
+        const el = makeLayerElement(layer);
+        while (ids.has(el.dataset.id)) el.dataset.id = uid("import");
+        ids.add(el.dataset.id);
+        return {...el.dataset,className:el.className,style:el.getAttribute("style")||"",innerHTML:el.innerHTML};
+      })
+    };
+  }
+
+  function normalizeTemplate(tpl) {
+    if (!tpl || typeof tpl !== "object" || Array.isArray(tpl) ||
+        (!tpl.sides && !Array.isArray(tpl.objects))) throw new Error("JSON 版型檔格式錯誤。");
+    const twoSides = Number(tpl.version) >= 4 && tpl.sides;
+    if (twoSides && (typeof tpl.sides !== "object" || Array.isArray(tpl.sides))) throw new Error("版型的正反面資料無效。");
+    const print = {
+      mode:tpl.print?.mode ?? state.print.mode,
+      templateCopies:Math.max(1, normalizedCopyCount(tpl.print?.templateCopies ?? state.print.templateCopies)),
+      quantityField:typeof tpl.print?.quantityField === "string" ? tpl.print.quantityField : state.print.quantityField
+    };
+    if (!["template","rows","quantity"].includes(print.mode)) throw new Error("版型的份數設定無效。");
+    const fieldMap = Object.fromEntries(Object.entries(tpl.fieldMap ?? {}).filter(([,target])=>typeof target==="string"));
+    return {
+      name: typeof tpl.name === "string" && tpl.name ? tpl.name : "未命名版型",
+      width:positiveMm(tpl.width,90), height:positiveMm(tpl.height,54),
+      fields:Array.isArray(tpl.fields) ? tpl.fields.filter(field=>typeof field==="string") : ["姓名","職稱","單位","編號","活動名稱"],
+      fieldMap, view:{
+        guides:typeof tpl.view?.guides === "boolean" ? tpl.view.guides : state.view.guides,
+        edgeSnap:typeof tpl.view?.edgeSnap === "boolean" ? tpl.view.edgeSnap : state.view.edgeSnap
+      }, print, a4:normalizedA4(tpl.a4,state.a4),
+      sides:{front:normalizeSide(twoSides ? tpl.sides.front : tpl),back:normalizeSide(twoSides ? tpl.sides.back : null)},
+      side:twoSides && tpl.currentSide==="back" ? "back" : "front"
     };
   }
 
   function restoreTemplate(tpl,fromHistory=false){
+    const safe = fromHistory ? null : normalizeTemplate(tpl);
+    finishPointerGesture?.();
     state.restoring=true;
-    $("#templateName").value=tpl.name||"未命名版型";
-    state.mmWidth=Number(tpl.width||90); state.mmHeight=Number(tpl.height||54);
-    state.fields=Array.isArray(tpl.fields)?tpl.fields:["姓名","職稱","單位","編號","活動名稱"];
-    state.fieldMap=tpl.fieldMap||{};
-    state.view={...state.view,...(tpl.view||{})};
-    state.print={...state.print,...(tpl.print||{})};
-    state.a4={...state.a4,...(tpl.a4||{})};
-
-    if(tpl.version>=4 && tpl.sides){
-      state.sides=structuredClone(tpl.sides);
-      state.currentSide=tpl.currentSide==="back"?"back":"front";
-    }else{
-      // V3 compatibility: import old single-side template as front.
-      state.sides={
-        front:{
-          backgroundImage:tpl.backgroundImage||"",
-          objects:(tpl.objects||[]).map(o=>({
-            ...o,
-            maxFont:o.maxFont||"",
-            minFont:o.minFont||""
-          }))
-        },
-        back:{backgroundImage:"",objects:[]}
-      };
-      state.currentSide="front";
+    const model = safe || {...tpl, side:tpl.currentSide};
+    try {
+      $("#templateName").value=model.name;
+      state.mmWidth=model.width; state.mmHeight=model.height;
+      for (const key of ["fields","fieldMap","view","print","a4","sides"]) state[key]=model[key];
+      state.currentSide=model.side;
+      applyCardSize(false);
+      renderFields();
+      $("#toggleGuides").checked = state.view.guides !== false;
+      $("#toggleEdgeSnap").checked = state.view.edgeSnap !== false;
+      updateDataUi();
+      renderSide(state.currentSide);
+      requestAnimationFrame(fitToScreen);
+    } finally {
+      state.restoring=false;
     }
-
-    applyCardSize(false);
-    renderFields();
-    $("#toggleGuides").checked = state.view.guides !== false;
-    $("#toggleEdgeSnap").checked = state.view.edgeSnap !== false;
-    updateDataUi();
-    renderSide(state.currentSide);
-    requestAnimationFrame(fitToScreen);
-    state.restoring=false;
     if(!fromHistory) pushHistory(true);
   }
 
@@ -149,12 +222,14 @@
     $("#redoBtn").disabled=state.historyIndex<0||state.historyIndex>=state.history.length-1;
   }
   function undo(){
+    finishPointerGesture?.();
     if(state.historyIndex<=0) return;
     state.historyIndex--;
     restoreTemplate(JSON.parse(state.history[state.historyIndex]),true);
     updateHistoryButtons();
   }
   function redo(){
+    finishPointerGesture?.();
     if(state.historyIndex>=state.history.length-1) return;
     state.historyIndex++;
     restoreTemplate(JSON.parse(state.history[state.historyIndex]),true);
@@ -167,60 +242,37 @@
     return Number.isFinite(n) && n > 0 ? Math.min(n, 9999) : 0;
   }
 
-  function buildOutputJobs() {
-    const mode = state.print.mode || "template";
-    const jobs = [];
-
-    if (mode === "template") {
-      const copies = Math.max(1, normalizedCopyCount(state.print.templateCopies || 1));
-      const rowIndex = state.data.length ? state.currentRow : null;
-      for (let i = 0; i < copies; i++) {
-        jobs.push({ rowIndex, copyIndex: i + 1, copyTotal: copies });
-      }
-      return jobs;
-    }
-
-    if (!state.data.length) return jobs;
-
-    if (mode === "rows") {
-      state.data.forEach((_, rowIndex) => {
-        jobs.push({ rowIndex, copyIndex: 1, copyTotal: 1 });
-      });
-      return jobs;
-    }
-
-    const field = state.print.quantityField;
-    state.data.forEach((row, rowIndex) => {
-      const copies = normalizedCopyCount(row?.[field]);
-      for (let i = 0; i < copies; i++) {
-        jobs.push({ rowIndex, copyIndex: i + 1, copyTotal: copies });
-      }
-    });
-    return jobs;
+  function copiesForRow(row, field) {
+    return own(row,field) ? normalizedCopyCount(row[field]) : 0;
   }
 
-  function outputJobBaseName(job, fallbackIndex=1) {
-    if (job?.rowIndex !== null && job?.rowIndex !== undefined && state.data.length) {
-      const old = state.currentRow;
-      state.currentRow = job.rowIndex;
-      const name = getFieldValue("姓名") || getFieldValue("職稱") || `record_${job.rowIndex + 1}`;
-      const id = getFieldValue("編號") || "";
-      state.currentRow = old;
-      let base = safeFileName((id ? id + "_" : "") + name);
-      if (job.copyTotal > 1) {
-        base += `_第${String(job.copyIndex).padStart(String(job.copyTotal).length, "0")}份`;
-      }
-      return base;
+  function* buildOutputJobs(records=state) {
+    const {data, print, currentRow} = records;
+    if (print.mode === "template") {
+      const copies = Math.max(1,normalizedCopyCount(print.templateCopies));
+      for (let i=1; i<=copies; i++) yield {rowIndex:data.length ? currentRow : null, copyIndex:i, copyTotal:copies};
+      return;
     }
-    const label = safeFileName($("#templateName").value || "識別證");
-    if (job?.copyTotal > 1) {
-      return `${label}_第${String(job.copyIndex).padStart(String(job.copyTotal).length, "0")}份`;
+    for (let rowIndex=0; rowIndex<data.length; rowIndex++) {
+      const copies = print.mode === "rows" ? 1 : copiesForRow(data[rowIndex],print.quantityField);
+      for (let i=1; i<=copies; i++) yield {rowIndex,copyIndex:i,copyTotal:copies};
     }
-    return label || `badge_${fallbackIndex}`;
   }
 
-  function estimateOutputCopies() {
-    return buildOutputJobs().length;
+  function outputJobBaseName(job, records) {
+    const {rowIndex, copyIndex, copyTotal} = job;
+    const name = rowIndex == null
+      ? records.name
+      : getFieldValue("姓名",rowIndex,records) || getFieldValue("職稱",rowIndex,records) || `record_${rowIndex+1}`;
+    const id = rowIndex == null ? "" : getFieldValue("編號",rowIndex,records);
+    const base = safeFileName((id ? id+"_" : "") + name);
+    return copyTotal > 1 ? `${base}_第${String(copyIndex).padStart(String(copyTotal).length,"0")}份` : base;
+  }
+
+  function estimateOutputCopies(print=state.print, data=state.data) {
+    if (print.mode === "template") return Math.max(1, normalizedCopyCount(print.templateCopies));
+    if (print.mode === "rows") return data.length;
+    return data.reduce((total,row)=>total+copiesForRow(row,print.quantityField),0);
   }
 
   function updatePrintSummary() {
@@ -261,10 +313,8 @@
       quantityField: $("#quantityFieldSelect").value || ""
     };
 
-    const old = { ...state.print };
-    state.print = tempState;
-    const count = estimateOutputCopies();
-    state.print = old;
+    const count = estimateOutputCopies(tempState);
+    $$(".mode-card").forEach(card=>card.classList.toggle("active",!!$('input[type="radio"]:checked',card)));
 
     $("#estimatedCopies").textContent = count;
 
@@ -318,161 +368,199 @@
   function showBusy(text){ $("#exportBusy").textContent=text||"處理中…"; $("#exportBusy").classList.remove("hidden"); }
   function hideBusy(){ $("#exportBusy").classList.add("hidden"); }
 
-  async function renderBadgeCanvas(){
-    refreshAllAutoShrink();
-    if(!window.html2canvas) throw new Error("html2canvas 未載入");
-    const selected=selectedObject();
-    clearResizeHandles();
-    $$(".design-object",badge).forEach(o=>o.classList.remove("selected"));
-    const oldTransform=badge.style.transform;
-    const oldW=scaleBox.style.width,oldH=scaleBox.style.height;
-    badge.style.transform="none";
-    scaleBox.style.width=`${badge.offsetWidth}px`;
-    scaleBox.style.height=`${badge.offsetHeight}px`;
-    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
-    const canvas=await html2canvas(badge,{backgroundColor:null,scale:2,useCORS:true,logging:false});
-    badge.style.transform=oldTransform;
-    scaleBox.style.width=oldW; scaleBox.style.height=oldH;
-    if(selected) selectObject(selected,false);
-    return canvas;
-  }
-
-  function refreshAllAutoShrink(){
-    $$(".design-object[data-type='text']",badge).forEach(autoShrink);
-  }
-
-  async function captureSide(side,rowIndex){
-    const oldSide=state.currentSide,oldRow=state.currentRow;
+  function snapshotForRendering() {
+    finishPointerGesture?.();
     syncCurrentSideFromDom();
-    if(side!==state.currentSide) renderSide(side);
-    state.currentRow=rowIndex;
-    applyCurrentRecord();
-    const canvas=await renderBadgeCanvas();
-    state.currentRow=oldRow;
-    if(oldSide!==state.currentSide) renderSide(oldSide);
-    applyCurrentRecord();
-    return canvas;
+    return {
+      name:$("#templateName").value || "識別證", mmWidth:state.mmWidth, mmHeight:state.mmHeight,
+      currentSide:state.currentSide,currentRow:state.currentRow,sides:{...state.sides},
+      data:state.data,fieldMap:{...state.fieldMap},print:{...state.print},a4:{...state.a4}
+    };
   }
 
-  function currentOutputBase(){
-    const name=getFieldValue("姓名")||`record_${state.currentRow+1}`;
-    const id=getFieldValue("編號")||"";
-    return safeFileName((id?id+"_":"")+name);
+  function makeBadgeScene(side, records) {
+    const scene = document.createElement("div");
+    scene.className = "badge badge-scene";
+    scene.style.width = `${records.mmWidth*cardPixelsPerMm}px`;
+    scene.style.height = `${records.mmHeight*cardPixelsPerMm}px`;
+    const model = records.sides[side];
+    setBadgeBackground(scene,model.backgroundImage);
+    for (const layer of model.objects) scene.appendChild(makeLayerElement(layer));
+    return scene;
   }
 
-  async function exportCurrentPng(){
-    try{
-      showBusy(`正在輸出${sideLabel(state.currentSide)} PNG…`);
-      const canvas=await renderBadgeCanvas();
-      const blob=await new Promise(r=>canvas.toBlob(r,"image/png"));
-      downloadBlob(blob,`${currentOutputBase()}_${sideLabel(state.currentSide)}.png`);
-    }finally{ hideBusy(); }
+  async function prepareImageForCapture(image) {
+    if (!image.getAttribute("src")) return;
+    if (typeof image.decode === "function") {
+      try { await image.decode(); }
+      catch { /* Some formats can render even when decode() rejects. */ }
+    } else if (!image.complete) {
+      await new Promise(resolve=>{
+        image.addEventListener("load",resolve,{once:true});
+        image.addEventListener("error",resolve,{once:true});
+      });
+    }
+    if (!image.naturalWidth || !image.naturalHeight) return;
+    const frame = image.parentElement;
+    const fit = image.style.objectFit || "contain";
+    if (fit === "fill") return;
+    const ratio = (fit==="cover" ? Math.max : Math.min)(
+      frame.clientWidth/image.naturalWidth,frame.clientHeight/image.naturalHeight);
+    const width=image.naturalWidth*ratio, height=image.naturalHeight*ratio;
+    Object.assign(image.style,{
+      width:`${width}px`,height:`${height}px`,
+      marginLeft:`${(frame.clientWidth-width)/2}px`,marginTop:`${(frame.clientHeight-height)/2}px`
+    });
   }
 
-  async function exportAllZip(){
-    const jobs=buildOutputJobs();
-    if(!jobs.length) return alert("目前輸出設定沒有可產生的識別證，請檢查 Excel 或輸出份數設定。");
-    if(!window.JSZip) return alert("JSZip 尚未載入。");
-
-    const zip=new JSZip();
-    const oldSide=state.currentSide,oldRow=state.currentRow;
-    try{
-      syncCurrentSideFromDom();
-      for(let j=0;j<jobs.length;j++){
-        const job=jobs[j];
-        if(job.rowIndex!==null && job.rowIndex!==undefined) state.currentRow=job.rowIndex;
-        applyCurrentRecord();
-
-        for(const side of ["front","back"]){
-          showBusy(`正在產生 ${j+1}/${jobs.length} ${sideLabel(side)}`);
-          const captureRow=(job.rowIndex!==null && job.rowIndex!==undefined) ? job.rowIndex : state.currentRow;
-          const canvas=await captureSide(side,captureRow);
-          const data=canvas.toDataURL("image/png").split(",")[1];
-          const base=outputJobBaseName(job,j+1);
-          zip.file(`${base}_${sideLabel(side)}.png`,data,{base64:true});
-        }
-      }
-      const blob=await zip.generateAsync({type:"blob"});
-      downloadBlob(blob,`${safeFileName($("#templateName").value)}_正反面_PNG.zip`);
-    }finally{
-      state.currentRow=oldRow;
-      if(state.currentSide!==oldSide) renderSide(oldSide);
-      applyCurrentRecord(); hideBusy();
+  async function renderBadgeCanvas(side,rowIndex,records) {
+    const render = await loadLibrary("html2canvas");
+    const scene = makeBadgeScene(side,records);
+    scene.classList.add("badge-capture");
+    scene.setAttribute("aria-hidden","true");
+    document.body.appendChild(scene);
+    try {
+      if (document.fonts) await document.fonts.ready;
+      applyRecordToBadge(scene,rowIndex,records);
+      await Promise.all($$(".image-content img",scene).map(prepareImageForCapture));
+      const width=scene.offsetWidth, height=scene.offsetHeight;
+      if (!width || !height) throw new Error("卡片尺寸過小，無法擷取。");
+      // Bound bitmap allocation independently of the PDF's physical dimensions.
+      const scale=Math.min(2,Math.sqrt(4995000/(width*height)),8192/Math.max(width,height));
+      const canvas = await render(scene,{backgroundColor:null,scale,useCORS:false,logging:false});
+      if (!canvas.width || !canvas.height) throw new Error("瀏覽器無法建立這個尺寸的圖片。");
+      return canvas;
+    } finally {
+      scene.remove();
     }
   }
 
-  async function exportPdf(){
-    const jobs=buildOutputJobs();
-    if(!jobs.length) return alert("目前輸出設定沒有可產生的識別證，請檢查 Excel 或輸出份數設定。");
-    if(!window.jspdf) return alert("jsPDF 尚未載入。");
+  async function captureBadgePng(side,rowIndex,records) {
+    const canvas = await renderBadgeCanvas(side,rowIndex,records);
+    return new Promise((resolve,reject)=>canvas.toBlob(blob=>{
+      if (blob) resolve(blob);
+      else reject(new Error("圖片編碼失敗，請縮小版型尺寸後再試。"));
+    },"image/png"));
+  }
 
-    const {jsPDF}=window.jspdf;
-    const orientation=state.mmWidth>=state.mmHeight?"landscape":"portrait";
-    const pdf=new jsPDF({orientation,unit:"mm",format:[state.mmWidth,state.mmHeight]});
-    const oldSide=state.currentSide,oldRow=state.currentRow;
-    let page=0;
+  function cacheBadgePng(records) {
+    const last = new Map();
+    return (side,rowIndex)=>{
+      const previous = last.get(side);
+      if (previous?.rowIndex===rowIndex) return previous.png;
+      const png = captureBadgePng(side,rowIndex,records);
+      last.set(side,{rowIndex,png});
+      return png;
+    };
+  }
 
-    try{
-      syncCurrentSideFromDom();
-      for(let j=0;j<jobs.length;j++){
-        const job=jobs[j];
-        if(job.rowIndex!==null && job.rowIndex!==undefined) state.currentRow=job.rowIndex;
-        applyCurrentRecord();
-
-        for(const side of ["front","back"]){
-          showBusy(`正在產生 PDF ${j+1}/${jobs.length} ${sideLabel(side)}`);
-          const captureRow=(job.rowIndex!==null && job.rowIndex!==undefined) ? job.rowIndex : state.currentRow;
-          const canvas=await captureSide(side,captureRow);
-          if(page>0) pdf.addPage([state.mmWidth,state.mmHeight],orientation);
-          pdf.addImage(canvas.toDataURL("image/png"),"PNG",0,0,state.mmWidth,state.mmHeight);
-          page++;
-        }
-      }
-      pdf.save(`${safeFileName($("#templateName").value)}_正反面.pdf`);
-    }finally{
-      state.currentRow=oldRow;
-      if(state.currentSide!==oldSide) renderSide(oldSide);
-      applyCurrentRecord(); hideBusy();
+  let exportRunning = false;
+  async function runBadgeExport(batch, task) {
+    if (exportRunning) return;
+    exportRunning = true;
+    try {
+      const records = snapshotForRendering();
+      const count = batch ? estimateOutputCopies(records.print,records.data) : 1;
+      if (!count) throw new Error("目前輸出設定沒有可產生的識別證，請檢查 Excel 或輸出份數設定。");
+      showBusy("正在準備匯出…");
+      await task(records,count);
+    } catch (error) {
+      alert(error.message || "匯出失敗，請再試一次。");
+    } finally {
+      hideBusy();
+      exportRunning = false;
     }
   }
 
-  async function buildA4Pdf(side){
-    const jobs=buildOutputJobs();
-    if(!jobs.length) throw new Error("目前輸出設定沒有可產生的識別證。");
+  async function exportCurrentPng() {
+    await runBadgeExport(false,async records=>{
+      const {currentSide:side,currentRow:row} = records;
+      const id = getFieldValue("編號",row,records);
+      const name = getFieldValue("姓名",row,records) || `record_${row+1}`;
+      const base = safeFileName((id ? id+"_" : "") + name);
+      showBusy(`正在輸出${sideLabel(side)} PNG…`);
+      downloadBlob(await captureBadgePng(side,row,records),`${base}_${sideLabel(side)}.png`);
+    });
+  }
 
-    const {jsPDF}=window.jspdf;
-    const cfg=state.a4;
-    const portrait=cfg.orientation==="portrait";
+  async function exportAllZip() {
+    await runBadgeExport(true,async (records,count)=>{
+      const Zip = await loadLibrary("JSZip");
+      const zip=new Zip(), used=new Set(), capture=cacheBadgePng(records);
+      let position=0;
+      for (const job of buildOutputJobs(records)) {
+        position++;
+        const base = outputJobBaseName(job,records);
+        let unique = base, suffix = 2;
+        while (used.has(unique.toLowerCase())) unique = `${base}_${suffix++}`;
+        used.add(unique.toLowerCase());
+        for (const side of ["front","back"]) {
+          showBusy(`正在產生 ${position}/${count} ${sideLabel(side)}`);
+          zip.file(`${unique}_${sideLabel(side)}.png`,await capture(side,job.rowIndex));
+        }
+      }
+      downloadBlob(await zip.generateAsync({type:"blob"}),`${safeFileName(records.name)}_正反面_PNG.zip`);
+    });
+  }
+
+  function badgeImageAlias(side,rowIndex) {
+    return `${side}_${rowIndex ?? "template"}`;
+  }
+
+  async function exportPdf() {
+    await runBadgeExport(true,async (records,count)=>{
+      const {jsPDF}=await loadLibrary("jspdf");
+      const {mmWidth:w,mmHeight:h}=records;
+      const orientation=w>=h?"landscape":"portrait";
+      const pdf=new jsPDF({orientation,unit:"mm",format:[w,h]});
+      if (Math.abs(pdf.internal.pageSize.getWidth()-w)>.01 || Math.abs(pdf.internal.pageSize.getHeight()-h)>.01) {
+        throw new Error("目前尺寸超過 PDF 可支援的紙張大小。");
+      }
+      const capture=cacheBadgePng(records);
+      let position=0, page=0;
+      for (const job of buildOutputJobs(records)) {
+        position++;
+        for (const side of ["front","back"]) {
+          showBusy(`正在產生 PDF ${position}/${count} ${sideLabel(side)}`);
+          const png = await capture(side,job.rowIndex);
+          if (page++) pdf.addPage([w,h],orientation);
+          pdf.addImage(new Uint8Array(await png.arrayBuffer()),"PNG",0,0,w,h,badgeImageAlias(side,job.rowIndex));
+        }
+      }
+      downloadBlob(pdf.output("blob"),`${safeFileName(records.name)}_正反面.pdf`);
+    });
+  }
+
+  function a4Layout(records) {
+    const cfg=records.a4, portrait=cfg.orientation==="portrait";
     const pageW=portrait?210:297,pageH=portrait?297:210;
     const availW=pageW-cfg.marginLeft-cfg.marginRight;
     const availH=pageH-cfg.marginTop-cfg.marginBottom;
-    const cols=Math.floor((availW+cfg.gapX)/(state.mmWidth+cfg.gapX));
-    const rows=Math.floor((availH+cfg.gapY)/(state.mmHeight+cfg.gapY));
+    const cols=Math.floor((availW+cfg.gapX)/(records.mmWidth+cfg.gapX)+1e-9);
+    const rows=Math.floor((availH+cfg.gapY)/(records.mmHeight+cfg.gapY)+1e-9);
     if(cols<1||rows<1) throw new Error("目前版型尺寸與邊界設定無法排入 A4。");
+    return {cols,perPage:cols*rows};
+  }
 
-    const perPage=cols*rows;
+  async function buildA4Pdf(side,records,count,jsPDF) {
+    const cfg=records.a4, {mmWidth:w,mmHeight:h}=records;
+    const {cols,perPage}=a4Layout(records);
     const pdf=new jsPDF({orientation:cfg.orientation,unit:"mm",format:"a4"});
-
-    for(let j=0;j<jobs.length;j++){
-      const job=jobs[j];
+    const capture=cacheBadgePng(records);
+    let j=0;
+    for (const job of buildOutputJobs(records)) {
       if(j>0 && j%perPage===0) pdf.addPage();
-      if(job.rowIndex!==null && job.rowIndex!==undefined) state.currentRow=job.rowIndex;
-      applyCurrentRecord();
-
-      showBusy(`A4 ${sideLabel(side)} ${j+1}/${jobs.length}`);
-      const captureRow=(job.rowIndex!==null && job.rowIndex!==undefined) ? job.rowIndex : state.currentRow;
-      const canvas=await captureSide(side,captureRow);
-
-      const slot=j%perPage;
-      const r=Math.floor(slot/cols),c=slot%cols;
-      const x=cfg.marginLeft+c*(state.mmWidth+cfg.gapX);
-      const y=cfg.marginTop+r*(state.mmHeight+cfg.gapY);
-      pdf.addImage(canvas.toDataURL("image/png"),"PNG",x,y,state.mmWidth,state.mmHeight);
-
+      showBusy(`A4 ${sideLabel(side)} ${j+1}/${count}`);
+      const png=await capture(side,job.rowIndex);
+      const slot=j%perPage, r=Math.floor(slot/cols), c=slot%cols;
+      const x=cfg.marginLeft+c*(w+cfg.gapX);
+      const y=cfg.marginTop+r*(h+cfg.gapY);
+      pdf.addImage(new Uint8Array(await png.arrayBuffer()),"PNG",x,y,w,h,badgeImageAlias(side,job.rowIndex));
       if(cfg.cutLine){
         pdf.setDrawColor(170);
-        pdf.rect(x,y,state.mmWidth,state.mmHeight);
+        pdf.rect(x,y,w,h);
       }
+      j++;
     }
     return pdf;
   }

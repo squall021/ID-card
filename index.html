@@ -6,11 +6,12 @@
   <title>名牌製作</title>
   <link rel="stylesheet" href="style.css" />
 
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+  <script defer src="vendor/qrcodejs-1.0.0.min.js"></script>
+  <script defer src="app-1.js"></script>
+  <script defer src="app-2.js"></script>
+  <script defer src="app-excel.js"></script>
+  <script defer src="app-3.js"></script>
+  <script defer src="app-4.js"></script>
 </head>
 <body>
   <header class="app-header">
@@ -182,7 +183,7 @@
     </section>
 
     <aside class="side-panel right-panel" id="rightPanel">
-      <div class="panel-title">屬性設定</div>
+      <div class="panel-title">屬性設定 <button type="button" id="closeNarrowProperties" class="icon-btn narrow-panel-close" aria-label="關閉屬性設定">×</button></div>
       <div id="noSelection" class="empty-state">請選取畫布上的物件</div>
 
       <div id="propertyEditor" class="property-editor hidden">
@@ -271,7 +272,7 @@
     </aside>
   </main>
 
-  <section id="dataDrawer" class="data-drawer">
+  <section id="dataDrawer" class="data-drawer" hidden>
     <div class="drawer-head">
       <div>
         <strong>Excel 名單</strong>
@@ -428,11 +429,6 @@
     </div>
   </div>
 
-  <div id="exportBusy" class="export-busy hidden">處理中…</div>
-
-  <script src="app-1.js"></script>
-  <script src="app-2.js"></script>
-  <script src="app-3.js"></script>
-  <script src="app-4.js"></script>
+  <div id="exportBusy" class="export-busy hidden" role="status">處理中…</div>
 </body>
 </html>
