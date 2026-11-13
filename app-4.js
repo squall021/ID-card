@@ -1,49 +1,44 @@
   async function exportA4(){
-    if(!buildOutputJobs().length) return alert("目前輸出設定沒有可產生的識別證，請檢查 Excel 或輸出份數設定。");
-    if(!window.jspdf) return alert("jsPDF 尚未載入。");
-    const oldSide=state.currentSide,oldRow=state.currentRow;
-    try{
-      syncCurrentSideFromDom();
-      if(state.a4.sideMode==="both"){
-        if(!window.JSZip) return alert("JSZip 尚未載入。");
-        const zip=new JSZip();
-        const frontPdf=await buildA4Pdf("front");
-        zip.file(`${safeFileName($("#templateName").value)}_A4_正面.pdf`,frontPdf.output("blob"));
-        const backPdf=await buildA4Pdf("back");
-        zip.file(`${safeFileName($("#templateName").value)}_A4_背面.pdf`,backPdf.output("blob"));
-        const blob=await zip.generateAsync({type:"blob"});
-        downloadBlob(blob,`${safeFileName($("#templateName").value)}_A4_正反面.zip`);
+    await runBadgeExport(true,async (records,count)=>{
+      a4Layout(records);
+      const {jsPDF}=await loadLibrary("jspdf");
+      const name=safeFileName(records.name);
+      if(records.a4.sideMode==="both"){
+        const Zip=await loadLibrary("JSZip");
+        const zip=new Zip();
+        for (const side of ["front","back"]) {
+          const pdf=await buildA4Pdf(side,records,count,jsPDF);
+          zip.file(`${name}_A4_${sideLabel(side)}.pdf`,pdf.output("blob"));
+        }
+        downloadBlob(await zip.generateAsync({type:"blob"}),`${name}_A4_正反面.zip`);
       }else{
-        const pdf=await buildA4Pdf(state.a4.sideMode);
-        pdf.save(`${safeFileName($("#templateName").value)}_A4_${sideLabel(state.a4.sideMode)}.pdf`);
+        const side=records.a4.sideMode;
+        const pdf=await buildA4Pdf(side,records,count,jsPDF);
+        downloadBlob(pdf.output("blob"),`${name}_A4_${sideLabel(side)}.pdf`);
       }
-    }catch(err){
-      alert(err.message||"A4 輸出失敗。");
-    }finally{
-      state.currentRow=oldRow;
-      if(state.currentSide!==oldSide) renderSide(oldSide);
-      applyCurrentRecord(); hideBusy();
-    }
+    });
+  }
+
+  function fitPreview(){
+    const scene=$("#previewBadge");
+    if (!scene) return;
+    const scale=Math.min(1,innerWidth*.88/scene.offsetWidth,innerHeight*.65/scene.offsetHeight);
+    scene.style.transform=`scale(${scale})`;
+    const wrap=$("#previewCloneWrap");
+    wrap.style.width=`${scene.offsetWidth*scale}px`;
+    wrap.style.height=`${scene.offsetHeight*scale}px`;
   }
 
   function updatePreviewClone(){
+    if ($("#previewOverlay").classList.contains("hidden")) return;
+    const records=snapshotForRendering();
+    const scene=makeBadgeScene(state.previewSide,records);
+    scene.id="previewBadge";
     const wrap=$("#previewCloneWrap");
-    wrap.innerHTML="";
-    const oldSide=state.currentSide;
-    syncCurrentSideFromDom();
-    if(state.previewSide!==state.currentSide) renderSide(state.previewSide);
-    applyCurrentRecord();
-    const clone=badge.cloneNode(true);
-    clone.id="previewBadge";
-    clone.querySelectorAll(".resize-handle").forEach(h=>h.remove());
-    clone.querySelectorAll(".design-object").forEach(o=>o.classList.remove("selected"));
-    clone.style.transform="none";
-    clone.style.width=`${state.mmWidth*8}px`;
-    clone.style.height=`${state.mmHeight*8}px`;
-    wrap.appendChild(clone);
-    if(oldSide!==state.currentSide) renderSide(oldSide);
-    applyCurrentRecord();
-    $("#previewCounter").textContent=state.data.length?`${state.currentRow+1} / ${state.data.length}`:"0 / 0";
+    wrap.textContent="";
+    wrap.appendChild(scene);
+    applyRecordToBadge(scene,records.currentRow,records);
+    fitPreview();
   }
 
   function bindA4(){
@@ -59,20 +54,48 @@
     });
     $("#closeA4Settings").addEventListener("click",()=>$("#a4Modal").classList.add("hidden"));
     $("#saveA4Settings").addEventListener("click",()=>{
-      state.a4={
-        sideMode:$("#a4SideMode").value,
-        orientation:$("#a4Orientation").value,
-        marginTop:Number($("#a4MarginTop").value)||0,
-        marginBottom:Number($("#a4MarginBottom").value)||0,
-        marginLeft:Number($("#a4MarginLeft").value)||0,
-        marginRight:Number($("#a4MarginRight").value)||0,
-        gapX:Number($("#a4GapX").value)||0,
-        gapY:Number($("#a4GapY").value)||0,
-        cutLine:$("#a4CutLine").checked
-      };
+      try {
+        state.a4=normalizedA4({
+          sideMode:$("#a4SideMode").value,
+          orientation:$("#a4Orientation").value,
+          marginTop:$("#a4MarginTop").value,
+          marginBottom:$("#a4MarginBottom").value,
+          marginLeft:$("#a4MarginLeft").value,
+          marginRight:$("#a4MarginRight").value,
+          gapX:$("#a4GapX").value,
+          gapY:$("#a4GapY").value,
+          cutLine:$("#a4CutLine").checked
+        },state.a4);
+      } catch (error) { alert(error.message); return; }
       $("#a4Modal").classList.add("hidden");
       markDirty(); pushHistory();
     });
+  }
+
+  function readCardDimensions(width,height){
+    return [positiveMm(width,90),positiveMm(height,54)];
+  }
+
+  function changeCardSize(width,height){
+    try { [state.mmWidth,state.mmHeight]=readCardDimensions(width,height); }
+    catch (error) {
+      $("#cardWidth").value=state.mmWidth;
+      $("#cardHeight").value=state.mmHeight;
+      alert(error.message);
+      return;
+    }
+    applyCardSize(true); markDirty(); pushHistory();
+  }
+
+  function toggleRightPanel(){
+    const narrow = matchMedia("(max-width: 900px)").matches;
+    if (narrow) {
+      workspace.classList.toggle("show-right-narrow");
+    } else {
+      $("#rightPanel").classList.toggle("collapsed");
+      workspace.classList.toggle("hide-right",$("#rightPanel").classList.contains("collapsed"));
+    }
+    if (state.fitMode) requestAnimationFrame(fitToScreen);
   }
 
   function bindEvents(){
@@ -84,10 +107,12 @@
       $("#newWidth").value=p.dataset.w; $("#newHeight").value=p.dataset.h;
     }));
     $("#confirmNewTemplate").addEventListener("click",()=>{
+      let size;
+      try { size=readCardDimensions($("#newWidth").value,$("#newHeight").value); }
+      catch (error) { alert(error.message); return; }
       $("#templateName").value=$("#newTemplateName").value||"未命名版型";
-      state.mmWidth=Number($("#newWidth").value)||90;
-      state.mmHeight=Number($("#newHeight").value)||54;
-      state.sides={front:structuredClone(defaultFront),back:{backgroundImage:"",objects:[]}};
+      [state.mmWidth,state.mmHeight]=size;
+      state.sides={front:cloneModel(defaultFront),back:{backgroundImage:"",objects:[]}};
       state.currentSide="front";
       state.print={mode:"template",templateCopies:1,quantityField:""};
       $("#newTemplateModal").classList.add("hidden");
@@ -96,10 +121,10 @@
     });
 
     $("#cardWidth").addEventListener("change",e=>{
-      state.mmWidth=Number(e.target.value)||90; applyCardSize(true); markDirty(); pushHistory();
+      changeCardSize(e.target.value,state.mmHeight);
     });
     $("#cardHeight").addEventListener("change",e=>{
-      state.mmHeight=Number(e.target.value)||54; applyCardSize(true); markDirty(); pushHistory();
+      changeCardSize(state.mmWidth,e.target.value);
     });
     $("#landscapeBtn").addEventListener("click",()=>{
       if(state.mmWidth<state.mmHeight)[state.mmWidth,state.mmHeight]=[state.mmHeight,state.mmWidth];
@@ -112,8 +137,15 @@
 
     $("#bgUpload").addEventListener("change",async e=>{
       const file=e.target.files?.[0]; if(!file) return;
-      badge.style.backgroundImage=`url("${await fileToDataURL(file)}")`;
-      syncCurrentSideFromDom(); markDirty(); pushHistory(); e.target.value="";
+      const side = state.currentSide;
+      try {
+        const src = imageDataUrl(await fileToDataURL(file));
+        if (!src) throw new Error("請選擇有效的圖片檔案。");
+        if (side===state.currentSide) setBadgeBackground(badge,`url("${src}")`);
+        else state.sides[side]={...state.sides[side],backgroundImage:`url("${src}")`};
+        markDirty(); pushHistory();
+      } catch (error) { alert(error.message || "底圖讀取失敗。"); }
+      finally { e.target.value=""; }
     });
     $("#clearBgBtn").addEventListener("click",()=>{
       badge.style.backgroundImage="";
@@ -122,14 +154,19 @@
     $("#copyFrontToBackBtn").addEventListener("click",()=>{
       syncCurrentSideFromDom();
       if(!confirm("確定要用正面內容覆蓋目前的背面版型嗎？")) return;
-      state.sides.back=structuredClone(state.sides.front);
+      state.sides.back=cloneModel(state.sides.front);
       if(state.currentSide==="back") renderSide("back");
       markDirty(); pushHistory();
     });
 
     $("#imageUpload").addEventListener("change",async e=>{
       const file=e.target.files?.[0]; if(!file) return;
-      addImageObject(await fileToDataURL(file)); e.target.value="";
+      try {
+        const src=imageDataUrl(await fileToDataURL(file));
+        if(!src) throw new Error("請選擇有效的圖片檔案。");
+        addImageObject(src);
+      } catch (error) { alert(error.message || "圖片讀取失敗。"); }
+      finally { e.target.value=""; }
     });
 
     $("#addFixedTextBtn").addEventListener("click",()=>addTextObject("",false));
@@ -169,17 +206,26 @@
         }
       }
 
+      const oldInfo=$("#dataInfo").textContent;
+      e.target.disabled=true;
+      $("#dataInfo").textContent="正在讀取 Excel…";
       try{ await importExcel(file); }
-      catch(err){ console.error(err); alert("Excel 讀取失敗，請確認檔案格式。"); }
-      e.target.value="";
+      catch(err){ $("#dataInfo").textContent=oldInfo; alert(err.message || "Excel 讀取失敗，請確認檔案格式。"); }
+      finally { e.target.disabled=false; e.target.value=""; }
     });
     $("#fieldMappingBtn").addEventListener("click",openFieldMapping);
     $("#removeExcelBtn").addEventListener("click",removeExcelData);
     $("#cancelMapping").addEventListener("click",()=>$("#mappingModal").classList.add("hidden"));
     $("#confirmMapping").addEventListener("click",confirmFieldMapping);
 
-    ["showDataBtn","expandDataBtn"].forEach(id=>$("#"+id).addEventListener("click",()=>$("#dataDrawer").classList.add("open")));
-    $("#closeDataDrawer").addEventListener("click",()=>$("#dataDrawer").classList.remove("open"));
+    ["showDataBtn","expandDataBtn"].forEach(id=>$("#"+id).addEventListener("click",openDataDrawer));
+    $("#closeDataDrawer").addEventListener("click",closeDataDrawer);
+    $("#dataTable tbody").addEventListener("click",event=>{
+      const row=event.target.closest("tr[data-record]");
+      if(!row) return;
+      state.currentRow=Number(row.dataset.record);
+      applyCurrentRecord(); renderDataTable(); updatePreviewClone();
+    });
 
     ["prevRecord","prevRecordRibbon"].forEach(id=>$("#"+id).addEventListener("click",()=>moveRecord(-1)));
     ["nextRecord","nextRecordRibbon"].forEach(id=>$("#"+id).addEventListener("click",()=>moveRecord(1)));
@@ -192,7 +238,10 @@
       $("#previewOverlay").classList.remove("hidden");
       updatePreviewClone();
     });
-    $("#closePreview").addEventListener("click",()=>$("#previewOverlay").classList.add("hidden"));
+    $("#closePreview").addEventListener("click",()=>{
+      $("#previewOverlay").classList.add("hidden");
+      $("#previewCloneWrap").textContent="";
+    });
     $("#previewPrev").addEventListener("click",()=>moveRecord(-1));
     $("#previewNext").addEventListener("click",()=>moveRecord(1));
     $$(".preview-side-btn").forEach(btn=>btn.addEventListener("click",()=>{
@@ -232,15 +281,15 @@
     });
 
     $("#toggleLeftBtn").addEventListener("click",()=>{
-      $("#leftPanel").classList.toggle("collapsed");
-      workspace.classList.toggle("hide-left",$("#leftPanel").classList.contains("collapsed"));
-      requestAnimationFrame(fitToScreen);
+      if (matchMedia("(max-width: 620px)").matches) workspace.classList.toggle("show-left-narrow");
+      else {
+        $("#leftPanel").classList.toggle("collapsed");
+        workspace.classList.toggle("hide-left",$("#leftPanel").classList.contains("collapsed"));
+      }
+      if (state.fitMode) requestAnimationFrame(fitToScreen);
     });
-    $("#toggleRightBtn").addEventListener("click",()=>{
-      $("#rightPanel").classList.toggle("collapsed");
-      workspace.classList.toggle("hide-right",$("#rightPanel").classList.contains("collapsed"));
-      requestAnimationFrame(fitToScreen);
-    });
+    $("#toggleRightBtn").addEventListener("click",toggleRightPanel);
+    $("#closeNarrowProperties").addEventListener("click",toggleRightPanel);
 
     stageScroll.addEventListener("wheel",e=>{
       if(!e.ctrlKey) return;
@@ -255,14 +304,18 @@
     });
 
     $("#saveTemplateBtn").addEventListener("click",()=>{
-      localStorage.setItem("badgeTemplateV4",JSON.stringify(templateSnapshotObject()));
-      $("#saveStatus").textContent="已儲存於本機";
+      try {
+        localStorage.setItem("badgeTemplateV4",JSON.stringify(templateSnapshotObject()));
+        $("#saveStatus").textContent="已儲存於本機";
+      } catch { alert("瀏覽器無法儲存此版型，可使用「匯出版型 JSON」備份。"); }
     });
     $("#loadTemplateBtn").addEventListener("click",()=>{
-      const raw=localStorage.getItem("badgeTemplateV4");
-      if(!raw) return alert("目前瀏覽器沒有已儲存的 V4 版型。");
-      restoreTemplate(JSON.parse(raw));
-      $("#saveStatus").textContent="已載入";
+      try {
+        const raw=localStorage.getItem("badgeTemplateV4");
+        if(!raw) return alert("目前瀏覽器沒有已儲存的 V4 版型。");
+        restoreTemplate(JSON.parse(raw));
+        $("#saveStatus").textContent="已載入";
+      } catch (err) { alert(err.message || "本機版型讀取失敗。"); }
     });
     $("#exportTemplateBtn").addEventListener("click",()=>{
       const blob=new Blob([JSON.stringify(templateSnapshotObject(),null,2)],{type:"application/json"});
@@ -273,7 +326,7 @@
       try{
         restoreTemplate(JSON.parse(await file.text()));
         $("#saveStatus").textContent="已匯入";
-      }catch(err){ console.error(err); alert("JSON 版型檔格式錯誤。"); }
+      }catch(err){ alert(err.message || "JSON 版型檔格式錯誤。"); }
       e.target.value="";
     });
 
@@ -294,7 +347,10 @@
       }
     });
 
-    window.addEventListener("resize",()=>{ if(state.fitMode) fitToScreen(); });
+    window.addEventListener("resize",()=>{
+      if(state.fitMode) fitToScreen();
+      if (!$("#previewOverlay").classList.contains("hidden")) fitPreview();
+    });
   }
 
   function init(){

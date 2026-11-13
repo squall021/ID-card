@@ -16,10 +16,7 @@
 
   function populateProperties(el){
     $("#propName").value=el.dataset.name||"";
-    $("#propX").value=pct(el.style.left,badge.clientWidth).toFixed(1);
-    $("#propY").value=pct(el.style.top,badge.clientHeight).toFixed(1);
-    $("#propW").value=pct(el.style.width,badge.clientWidth).toFixed(1);
-    $("#propH").value=pct(el.style.height,badge.clientHeight).toFixed(1);
+    updateGeometryFields(el);
     $("#propLocked").checked=isLocked(el);
 
     ["textProperties","imageProperties","boxProperties","qrProperties"].forEach(id=>$("#"+id).classList.add("hidden"));
@@ -54,16 +51,21 @@
     }
   }
 
+  const shrinkCache = new WeakMap();
   function autoShrink(el){
     if(el.dataset.type!=="text") return;
     const c=textContentEl(el);
     if(!c) return;
 
-    if(el.dataset.autoShrink!=="1") return;
+    if(el.dataset.autoShrink!=="1") { shrinkCache.delete(el); return; }
 
-    let maxFont=Number(el.dataset.maxFont||parseFloat(getComputedStyle(el).fontSize)||16);
-    let minFont=Number(el.dataset.minFont||10);
+    let maxFont=validFontSize(el.dataset.maxFont||parseFloat(getComputedStyle(el).fontSize),16);
+    let minFont=validFontSize(el.dataset.minFont,10);
     if(minFont>maxFont) [minFont,maxFont]=[maxFont,minFont];
+    const key = JSON.stringify([c.textContent,c.clientWidth,c.clientHeight,maxFont,minFont,
+      el.style.fontFamily,el.style.fontWeight,el.style.letterSpacing,el.style.lineHeight,el.style.textAlign]);
+    const cached = shrinkCache.get(el);
+    if (cached?.key === key && el.style.fontSize === cached.size) return;
 
     el.style.fontSize=`${maxFont}px`;
 
@@ -76,10 +78,16 @@
       el.style.fontSize=`${fs}px`;
       if(fs===minFont) break;
     }
+    shrinkCache.set(el, {key, size:el.style.fontSize});
   }
 
-  function refreshAllAutoShrink(){
-    $$(".design-object[data-type='text']",badge).forEach(autoShrink);
+  function validFontSize(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.min(n, 160) : fallback;
+  }
+
+  function refreshAllAutoShrink(root=badge){
+    $$(".design-object[data-type='text']",root).forEach(autoShrink);
   }
 
   function bindProperties(){
@@ -124,7 +132,7 @@
       el.classList.toggle("dynamic",!!e.target.value);
       const c=textContentEl(el);
       if(c){
-        c.textContent=e.target.value ? (getFieldValue(e.target.value)||`{{${e.target.value}}}`) : c.textContent;
+        if (e.target.value) c.textContent=dynamicTextValue(e.target.value,state.currentRow,state);
       }
       autoShrink(el);
       syncCurrentSideFromDom(); markDirty(); pushHistory();
@@ -138,7 +146,7 @@
 
     $("#propFontSize").addEventListener("change",e=>{
       const el=selectedObject(); if(!el||el.dataset.type!=="text") return;
-      const fs=Number(e.target.value)||16;
+      const fs=validFontSize(e.target.value,16);
       el.style.fontSize=`${fs}px`;
       if(el.dataset.autoShrink==="1") el.dataset.maxFont=String(fs);
       autoShrink(el);
@@ -179,14 +187,14 @@
 
     $("#propMaxFont").addEventListener("change",e=>{
       const el=selectedObject(); if(!el||el.dataset.type!=="text") return;
-      el.dataset.maxFont=String(Number(e.target.value)||16);
+      el.dataset.maxFont=String(validFontSize(e.target.value,16));
       autoShrink(el); populateProperties(el);
       syncCurrentSideFromDom(); markDirty(); pushHistory();
     });
 
     $("#propMinFont").addEventListener("change",e=>{
       const el=selectedObject(); if(!el||el.dataset.type!=="text") return;
-      el.dataset.minFont=String(Number(e.target.value)||8);
+      el.dataset.minFont=String(validFontSize(e.target.value,8));
       autoShrink(el); populateProperties(el);
       syncCurrentSideFromDom(); markDirty(); pushHistory();
     });
@@ -263,6 +271,7 @@
   }
 
   function deleteObject(el){
+    finishPointerGesture?.();
     if(!confirm(`確定要刪除「${objectName(el)}」嗎？`)) return;
     el.remove();
     selectObject(null);
@@ -284,7 +293,7 @@
     el.style.cssText="left:25%;top:30%;width:50%;height:12%;font-size:24px;text-align:center;justify-content:center;";
     const c=document.createElement("div");
     c.className="object-content text-content";
-    c.textContent=dynamic?(getFieldValue(field)||`{{${field}}}`):"雙擊修改文字";
+    c.textContent=dynamic?dynamicTextValue(field,state.currentRow,state):"雙擊修改文字";
     el.appendChild(c);
     badge.appendChild(el);
     makeInteractive(el);
@@ -298,7 +307,7 @@
     el.className="design-object image-object";
     el.dataset.id=uid("img"); el.dataset.type="image"; el.dataset.name="圖片"; el.dataset.locked="0";
     el.style.cssText="left:8%;top:8%;width:22%;height:22%;";
-    el.innerHTML=`<div class="object-content image-content"><img src="${src}" alt="" style="object-fit:contain"></div>`;
+    el.appendChild(makeImageContent(imageDataUrl(src)));
     badge.appendChild(el); makeInteractive(el); selectObject(el);
     syncCurrentSideFromDom(); renderLayers(); markDirty(); pushHistory();
   }
@@ -326,52 +335,90 @@
     syncCurrentSideFromDom(); renderLayers(); markDirty(); pushHistory();
   }
 
-  function renderQr(el){
+  const qrCache = new WeakMap();
+  function renderQr(el,rowIndex=state.currentRow,records=state){
     const target=$(".qr-content",el);
     if(!target) return;
-    target.innerHTML="";
-    const value=el.dataset.qrField ? (getFieldValue(el.dataset.qrField)||" ") : (el.dataset.qrContent||" ");
-    if(!window.QRCode){ target.textContent="QR"; return; }
+    const content=el.dataset.qrField ? getFieldValue(el.dataset.qrField,rowIndex,records) : el.dataset.qrContent;
+    const value=String(content ?? "") || " ";
     const size=Math.max(60,Math.floor(Math.min(el.clientWidth,el.clientHeight)));
-    new QRCode(target,{text:String(value),width:size,height:size,correctLevel:QRCode.CorrectLevel.M});
+    const cached = qrCache.get(el);
+    if (cached?.value === value && cached.size === size) return;
+    target.textContent="";
+    if(!window.QRCode){ target.textContent="QR"; return; }
+    try {
+      new QRCode(target,{text:value,width:size,height:size,correctLevel:QRCode.CorrectLevel.M});
+    } catch {
+      target.textContent = "QR 內容過長";
+    }
+    qrCache.set(el, {value, size});
   }
 
-  function getFieldValue(field){
-    if(!state.data.length) return "";
-    const row=state.data[state.currentRow]||{};
-    if(field in row) return row[field]??"";
-    const source=Object.keys(state.fieldMap).find(k=>state.fieldMap[k]===field);
-    return source ? (row[source]??"") : "";
+  function getFieldValue(field,rowIndex=state.currentRow,records=state){
+    const row=records.data[rowIndex];
+    if(!row) return "";
+    if(own(row,field)) return row[field]??"";
+    const source=Object.keys(records.fieldMap).find(k=>records.fieldMap[k]===field);
+    return source && own(row,source) ? (row[source]??"") : "";
   }
 
-  function applyCurrentRecord(){
-    $$(".design-object[data-type='text']",badge).forEach(el=>{
+  function dynamicTextValue(field,rowIndex,records) {
+    return records.data.length ? String(getFieldValue(field,rowIndex,records)) : `{{${field}}}`;
+  }
+
+  function applyRecordToBadge(root,rowIndex,records){
+    $$(".design-object[data-type='text']",root).forEach(el=>{
       if(el.dataset.field){
         const c=textContentEl(el);
-        if(c) c.textContent=state.data.length ? String(getFieldValue(el.dataset.field)??"") : `{{${el.dataset.field||""}}}`;
+        const value=dynamicTextValue(el.dataset.field,rowIndex,records);
+        if(c && c.textContent!==value) c.textContent=value;
       }
       autoShrink(el);
     });
-    $$(".design-object[data-type='qr']",badge).forEach(renderQr);
+    $$(".design-object[data-type='qr']",root).forEach(el=>renderQr(el,rowIndex,records));
+  }
 
+  function applyCurrentRecord(){
+    applyRecordToBadge(badge,state.currentRow,state);
     const row=state.data[state.currentRow]||{};
-    const nameKey=["姓名","Name","name"].find(k=>k in row);
+    const nameKey=["姓名","Name","name"].find(k=>own(row,k));
     $("#currentRecordName").textContent=state.data.length ? String(row[nameKey]??`第 ${state.currentRow+1} 筆`) : "範例資料";
     $("#recordCounter").textContent=state.data.length ? `${state.currentRow+1} / ${state.data.length}` : "0 / 0";
     $("#previewCounter").textContent=$("#recordCounter").textContent;
   }
 
+  let renderedRows = null;
+  let highlightedRecord = null;
+  function invalidateDataTable() {
+    renderedRows = highlightedRecord = null;
+    $("#dataTable thead").textContent = "";
+    $("#dataTable tbody").textContent = "";
+  }
   function renderDataTable(){
+    if ($("#dataDrawer").hidden) return;
     const thead=$("#dataTable thead"),tbody=$("#dataTable tbody");
-    thead.innerHTML=state.headers.length?`<tr><th>#</th>${state.headers.map(h=>`<th>${escapeHtml(h)}</th>`).join("")}</tr>`:"";
-    tbody.innerHTML="";
-    state.data.forEach((row,i)=>{
-      const tr=document.createElement("tr");
-      if(i===state.currentRow) tr.classList.add("active");
-      tr.innerHTML=`<td>${i+1}</td>${state.headers.map(h=>`<td>${escapeHtml(row[h]??"")}</td>`).join("")}`;
-      tr.addEventListener("click",()=>{ state.currentRow=i; applyCurrentRecord(); renderDataTable(); });
-      tbody.appendChild(tr);
-    });
+    if (renderedRows !== state.data) {
+      thead.innerHTML=state.headers.length?`<tr><th scope="col">#</th>${state.headers.map(h=>`<th scope="col">${escapeHtml(h)}</th>`).join("")}</tr>`:"";
+      tbody.innerHTML=state.data.map((row,i)=>
+        `<tr data-record="${i}"><td>${i+1}</td>${state.headers.map(h=>`<td>${escapeHtml(own(row,h)?row[h]:"")}</td>`).join("")}</tr>`
+      ).join("");
+      renderedRows = state.data;
+      highlightedRecord = null;
+    }
+    highlightedRecord?.classList.remove("active");
+    highlightedRecord = tbody.rows[state.currentRow];
+    highlightedRecord?.classList.add("active");
+  }
+
+  function openDataDrawer() {
+    $("#dataDrawer").hidden = false;
+    $("#dataDrawer").classList.add("open");
+    renderDataTable();
+  }
+
+  function closeDataDrawer() {
+    $("#dataDrawer").classList.remove("open");
+    $("#dataDrawer").hidden = true;
   }
 
 
@@ -394,6 +441,7 @@
     state.headers = [];
     state.currentRow = 0;
     state.fieldMap = {};
+    invalidateDataTable();
 
     // If the current print mode depends on Excel, switch back to repeated-template mode.
     if(state.print.mode !== "template"){
@@ -406,7 +454,7 @@
     applyCurrentRecord();
     updateDataUi();
     $("#recordSearch").value = "";
-    $("#dataDrawer").classList.remove("open");
+    closeDataDrawer();
 
     markDirty();
     pushHistory();
